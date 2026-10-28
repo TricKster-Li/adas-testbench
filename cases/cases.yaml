@@ -1,0 +1,289 @@
+# =============================================================================
+# ADAS 测试台 · 用例集
+#
+# 设计方法：
+#   behaviour  —— 等价类划分 + 边界值分析（TTC 阈值上/下/恰好等于）
+#   transition —— 状态机合法迁移覆盖
+#   range      —— 按 DBC 定义的信号范围做验收
+#   cycle      —— 报文周期稳定性与超时检出
+#
+# 约定：
+#   rel_speed 为负 = 正在接近；TTC = distance / (-rel_speed)
+#   用例统一用 rel_speed = -10，于是 distance / 10 就是 TTC，便于构造精确边界
+#   常规用例车速取 50 km/h（低于 ECU 内部 60 km/h 的高速分支），
+#   只有 RNG-004 / BHV-012 故意用 80 km/h 去踩高速分支。
+# =============================================================================
+
+meta:
+  target: AEB_Cmd
+  dut: virtual AEB ECU
+  cycle_ms: 10
+  total: 30
+
+cases:
+
+  # ── 行为断言：阈值与边界 ────────────────────────────────────────────
+  - id: BHV-001
+    name: TTC 10s 远大于预警阈值，保持 OFF 且无预警
+    category: behaviour
+    steps:
+      - { speed: 50, distance: 100, rel_speed: -10 }
+    expect: { state: OFF, warning: 0 }
+
+  - id: BHV-002
+    name: TTC 2.6s 在预警阈值上方，应保持 OFF
+    category: behaviour
+    steps:
+      - { speed: 50, distance: 26, rel_speed: -10 }
+    expect: { state: OFF, warning: 0 }
+
+  - id: BHV-003
+    name: TTC 恰好 2.5s（预警边界），应进入 ARMED
+    category: behaviour
+    steps:
+      - { speed: 50, distance: 25, rel_speed: -10 }
+    expect: { state: ARMED, warning: 1 }
+
+  - id: BHV-004
+    name: TTC 2.4s 已越过预警阈值，应进入 ARMED
+    category: behaviour
+    steps:
+      - { speed: 50, distance: 24, rel_speed: -10 }
+    expect: { state: ARMED, warning: 1 }
+
+  - id: BHV-005
+    name: TTC 1.6s 未到制动阈值，应停在 ARMED
+    category: behaviour
+    steps:
+      - { speed: 50, distance: 16, rel_speed: -10 }
+    expect: { state: ARMED, warning: 1 }
+
+  - id: BHV-006
+    name: TTC 恰好 1.5s（制动边界），应触发 ACTIVE
+    category: behaviour
+    preheat:
+      - { speed: 50, distance: 20, rel_speed: -10 }    # TTC 2.0 → ARMED
+    steps:
+      - { speed: 50, distance: 15, rel_speed: -10 }    # TTC 1.5 → 期望 ACTIVE
+    expect: { state: ACTIVE, warning: 1 }
+
+  - id: BHV-007
+    name: TTC 1.4s 越过制动阈值，应触发 ACTIVE
+    category: behaviour
+    preheat:
+      - { speed: 50, distance: 20, rel_speed: -10 }
+    steps:
+      - { speed: 50, distance: 14, rel_speed: -10 }
+    expect: { state: ACTIVE, warning: 1 }
+
+  - id: BHV-008
+    name: TTC 恰好 3.0s（解除边界），应保持 ARMED 不解除
+    category: behaviour
+    preheat:
+      - { speed: 50, distance: 20, rel_speed: -10 }    # ARMED
+    steps:
+      - { speed: 50, distance: 20, rel_speed: -10 }
+      - { speed: 50, distance: 30, rel_speed: -10 }    # TTC 3.0，未超过解除阈值
+    expect: { state: ARMED, warning: 1 }
+
+  - id: BHV-009
+    name: TTC 3.1s 超过解除阈值，应退回 OFF
+    category: behaviour
+    preheat:
+      - { speed: 50, distance: 20, rel_speed: -10 }    # ARMED
+    steps:
+      - { speed: 50, distance: 31, rel_speed: -10 }
+    expect: { state: OFF, warning: 0 }
+
+  - id: BHV-010
+    name: 预警中目标丢失，应退回 OFF
+    category: behaviour
+    preheat:
+      - { speed: 50, distance: 20, rel_speed: -10 }    # ARMED
+    steps:
+      - { speed: 50, distance: 20, rel_speed: -10, obj_valid: 0 }
+    expect: { state: OFF, warning: 0 }
+
+  - id: BHV-011
+    name: 目标正在远离（相对速度为负的接近量消失），应保持 OFF
+    category: behaviour
+    steps:
+      - { speed: 50, distance: 20, rel_speed: 5 }
+    expect: { state: OFF, warning: 0 }
+
+  - id: BHV-012
+    name: 高速 80km/h 触发制动时，减速度请求仍须落在 DBC 范围内
+    category: behaviour
+    preheat:
+      - { speed: 80, distance: 20, rel_speed: -10 }    # ARMED
+    steps:
+      - { speed: 80, distance: 14, rel_speed: -10 }    # ACTIVE
+    expect: { state: ACTIVE, decel_min: -12, decel_max: 0 }
+
+  # ── 状态迁移 ────────────────────────────────────────────────────────
+  - id: TRN-001
+    name: OFF → ARMED 合法迁移
+    category: transition
+    steps:
+      - { speed: 50, distance: 25, rel_speed: -10 }
+    expect: { state: ARMED }
+
+  - id: TRN-002
+    name: ARMED → ACTIVE 合法迁移
+    category: transition
+    preheat:
+      - { speed: 50, distance: 20, rel_speed: -10 }
+    steps:
+      - { speed: 50, distance: 14, rel_speed: -10 }
+    expect: { state: ACTIVE }
+
+  - id: TRN-003
+    name: ACTIVE 中目标丢失，应先退回 ARMED 而不是直接 OFF
+    category: transition
+    preheat:
+      - { speed: 50, distance: 20, rel_speed: -10 }
+      - { speed: 50, distance: 14, rel_speed: -10 }    # ACTIVE
+    steps:
+      - { speed: 50, distance: 14, rel_speed: -10, obj_valid: 0 }
+    expect: { state: ARMED, warning: 1 }
+
+  - id: TRN-004
+    name: 制动中车辆停住，状态应先回 ARMED 保持预警
+    category: transition
+    preheat:
+      - { speed: 50, distance: 20, rel_speed: -10 }
+      - { speed: 50, distance: 14, rel_speed: -10 }    # ACTIVE
+    steps:
+      - { speed: 0.2, distance: 5, rel_speed: -10 }    # 已停车
+    expect: { state: ARMED, warning: 1 }
+
+  - id: TRN-005
+    name: 完整链路 OFF → ARMED → ACTIVE → ARMED → OFF
+    category: transition
+    preheat:
+      - { speed: 50, distance: 25, rel_speed: -10 }    # OFF → ARMED
+    steps:
+      - { speed: 50, distance: 20, rel_speed: -10 }    # 保持 ARMED
+      - { speed: 50, distance: 14, rel_speed: -10 }    # ARMED → ACTIVE
+      - { speed: 50, distance: 14, rel_speed: -10, obj_valid: 0 }  # → ARMED
+      - { speed: 50, distance: 40, rel_speed: -10 }    # → OFF
+    expect: { state: OFF, warning: 0 }
+
+  - id: TRN-006
+    name: 预警后危险解除，ARMED → OFF
+    category: transition
+    preheat:
+      - { speed: 50, distance: 25, rel_speed: -10 }
+    steps:
+      - { speed: 50, distance: 31, rel_speed: -10 }
+    expect: { state: OFF }
+
+  - id: TRN-007
+    name: TTC 在预警区间内小幅波动，状态应稳定在 ARMED 不抖动
+    category: transition
+    preheat:
+      - { speed: 50, distance: 25, rel_speed: -10 }
+    steps:
+      - { speed: 50, distance: 22, rel_speed: -10 }
+      - { speed: 50, distance: 24, rel_speed: -10 }
+      - { speed: 50, distance: 21, rel_speed: -10 }
+    expect: { state: ARMED, warning: 1 }
+
+  - id: TRN-008
+    name: 制动中距离继续缩短，应保持 ACTIVE 不误退出
+    category: transition
+    preheat:
+      - { speed: 50, distance: 20, rel_speed: -10 }
+      - { speed: 50, distance: 14, rel_speed: -10 }    # ACTIVE
+    steps:
+      - { speed: 50, distance: 10, rel_speed: -10 }
+    expect: { state: ACTIVE, decel_min: -9, decel_max: -6 }
+
+  # ── 值域 ────────────────────────────────────────────────────────────
+  - id: RNG-001
+    name: 常规工况下 AEB_State 应落在 DBC 定义范围 [0,7]
+    category: range
+    steps:
+      - { speed: 50, distance: 25, rel_speed: -10 }
+    expect: { state: ARMED }
+
+  - id: RNG-002
+    name: 常规工况下 DecelReq 应落在 DBC 定义范围 [-12,0]
+    category: range
+    preheat:
+      - { speed: 50, distance: 20, rel_speed: -10 }
+    steps:
+      - { speed: 50, distance: 14, rel_speed: -10 }
+    expect: { state: ACTIVE, decel_min: -9, decel_max: -6 }
+
+  - id: RNG-003
+    name: AEB_Warning 在预警态应为 1、静默态应为 0
+    category: range
+    preheat:
+      - { speed: 50, distance: 20, rel_speed: -10 }
+    steps:
+      - { speed: 50, distance: 40, rel_speed: -10 }
+    expect: { state: OFF, warning: 0 }
+
+  - id: RNG-004
+    name: 高速工况多次触发，减速度请求不得越界
+    category: range
+    preheat:
+      - { speed: 80, distance: 22, rel_speed: -10 }
+    steps:
+      - { speed: 80, distance: 16, rel_speed: -10 }
+      - { speed: 80, distance: 12, rel_speed: -10 }
+    expect: { state: ACTIVE, decel_min: -12, decel_max: 0 }
+
+  - id: RNG-005
+    name: 极近距离 0.5m 触发，输出仍须合法
+    category: range
+    preheat:
+      - { speed: 50, distance: 20, rel_speed: -10 }
+    steps:
+      - { speed: 50, distance: 0.5, rel_speed: -10 }
+    expect: { state: ACTIVE, decel_min: -12, decel_max: 0 }
+
+  - id: RNG-006
+    name: 相对速度取 DBC 下限 -100 m/s，输出仍须合法
+    category: range
+    steps:
+      - { speed: 50, distance: 200, rel_speed: -100 }
+    expect: { state: ARMED, decel_min: -12, decel_max: 0 }
+
+  # ── 周期 ────────────────────────────────────────────────────────────
+  - id: CYC-001
+    name: AEB_Cmd 稳定 50ms 周期，无卡顿不应报超时
+    category: cycle
+    frames: 20
+    cycle_ms: 50
+    limit_ms: 100
+    stall_at: null
+
+  - id: CYC-002
+    name: 第 10 帧卡顿 200ms，周期检查应检出超时
+    category: cycle
+    frames: 20
+    cycle_ms: 50
+    limit_ms: 100
+    stall_at: 10
+    stall_ms: 200
+    expect_finding: CYCLE
+
+  - id: CYC-003
+    name: 第 5 帧卡顿 200ms，周期检查应检出超时
+    category: cycle
+    frames: 15
+    cycle_ms: 50
+    limit_ms: 100
+    stall_at: 5
+    stall_ms: 200
+    expect_finding: CYCLE
+
+  - id: CYC-004
+    name: 连续 25 帧无卡顿，周期检查不应误报
+    category: cycle
+    frames: 25
+    cycle_ms: 50
+    limit_ms: 100
+    stall_at: null
